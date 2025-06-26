@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/io.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 void main() {
   runApp(CollabCompilerApp());
@@ -25,43 +25,124 @@ class CompilerScreen extends StatefulWidget {
 class _CompilerScreenState extends State<CompilerScreen> {
   final codeController = TextEditingController();
   String output = "Output will appear here...";
-  late IOWebSocketChannel socket;
+  IO.Socket? socket;
+  bool isConnected = false;
+  String connectionStatus = "Connecting...";
 
   @override
   void initState() {
     super.initState();
-
-    // Change this to your local IP if testing on real mobile over WiFi
-    socket = IOWebSocketChannel.connect("ws://collab-c-compiler.selfmade.one");
-
-    socket.stream.listen((message) {
-      if (message != codeController.text) {
-        setState(() {
-          codeController.text = message;
-        });
+    _connectSocket();
+    
+    codeController.addListener(() {
+      if (isConnected && socket != null) {
+        try {
+          socket!.emit('codeChange', codeController.text);
+        } catch (e) {
+          // Silent error handling for production
+        }
       }
     });
+  }
 
-    codeController.addListener(() {
-      socket.sink.add(codeController.text);
+  void _connectSocket() {
+    try {
+      setState(() {
+        connectionStatus = "Connecting...";
+        isConnected = false;
+      });
+
+      // Close existing connection if any
+      socket?.disconnect();
+
+      socket = IO.io('https://collab-c-compiler.selfmade.one', 
+        IO.OptionBuilder()
+          .setTransports(['websocket', 'polling'])
+          .disableAutoConnect()
+          .setTimeout(15000)
+          .setReconnectionAttempts(5)
+          .setReconnectionDelay(2000)
+          .build()
+      );
+
+      socket!.onConnect((_) {
+        setState(() {
+          isConnected = true;
+          connectionStatus = "Connected";
+        });
+      });
+
+      socket!.on('codeUpdate', (data) {
+        if (data != codeController.text) {
+          setState(() {
+            codeController.text = data.toString();
+          });
+        }
+      });
+
+      socket!.onDisconnect((_) {
+        setState(() {
+          isConnected = false;
+          connectionStatus = "Disconnected";
+        });
+        _scheduleReconnect();
+      });
+
+      socket!.onConnectError((error) {
+        setState(() {
+          isConnected = false;
+          connectionStatus = "Connection failed";
+        });
+        _scheduleReconnect();
+      });
+
+      socket!.onError((error) {
+        setState(() {
+          isConnected = false;
+          connectionStatus = "Connection error";
+        });
+      });
+
+      socket!.connect();
+
+    } catch (e) {
+      setState(() {
+        isConnected = false;
+        connectionStatus = "Failed to connect";
+      });
+      _scheduleReconnect();
+    }
+  }
+
+  void _scheduleReconnect() {
+    Future.delayed(Duration(seconds: 5), () {
+      if (!isConnected && mounted) {
+        _connectSocket();
+      }
     });
   }
 
   Future<void> runCode() async {
-    final res = await http.post(
-      Uri.parse("https://collab-c-compiler.selfmade.one/run"),
-      headers: {'Content-Type': 'text/plain'},
-      body: codeController.text,
-    );
+    try {
+      final response = await http.post(
+        Uri.parse("https://collab-c-compiler.selfmade.one/run"),
+        headers: {'Content-Type': 'text/plain'},
+        body: codeController.text,
+      );
 
-    setState(() {
-      output = res.body;
-    });
+      setState(() {
+        output = response.body;
+      });
+    } catch (e) {
+      setState(() {
+        output = "Error connecting to server: $e";
+      });
+    }
   }
 
   @override
   void dispose() {
-    socket.sink.close();
+    socket?.disconnect();
     codeController.dispose();
     super.dispose();
   }
@@ -72,13 +153,37 @@ class _CompilerScreenState extends State<CompilerScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('C Compiler (Mobile)'),
+        title: Text('Collaborative C Compiler'),
         centerTitle: true,
+        actions: [
+          Icon(
+            isConnected ? Icons.wifi : Icons.wifi_off,
+            color: isConnected ? Colors.green : Colors.red,
+          ),
+          SizedBox(width: 16)
+        ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
+      body: Column(
+        children: [
+          // Connection status bar
+          Container(
+            width: double.infinity,
+            padding: EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+            color: isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
+            child: Text(
+              connectionStatus,
+              style: TextStyle(
+                color: isConnected ? Colors.green : Colors.red,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
             SizedBox(
               height: screenHeight * 0.4,
               child: TextField(
@@ -122,8 +227,11 @@ class _CompilerScreenState extends State<CompilerScreen> {
                 ),
               ),
             ),
-          ],
-        ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
